@@ -1,5 +1,5 @@
 // frontend/src/services/api.js
-const rawUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/assets';
+const rawUrl = process.env.NEXT_PUBLIC_API_URL || '/api';
 const API_BASE = rawUrl.endsWith('/assets')
   ? rawUrl
   : `${rawUrl.replace(/\/$/, '')}/assets`;
@@ -10,9 +10,9 @@ export const AssetService = {
     let res;
     try {
       res = await fetch(`${API_BASE}?${query}`, { cache: 'no-store' });
-    } catch (networkErr) {
+    } catch {
       throw new Error(
-        'Cannot connect to Backend (http://localhost:5000). Make sure "npm run dev" is running in your backend terminal.'
+        'Cannot connect to the inventory API. Make sure the backend is running and the Next.js API proxy is configured.'
       );
     }
 
