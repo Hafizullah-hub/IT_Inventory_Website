@@ -13,48 +13,116 @@ async function getAiClient() {
 }
 
 async function computeStats(query = {}) {
-  const result = await Asset.aggregate([
+  const [facetResult] = await Asset.aggregate([
     { $match: query },
     {
-      $group: {
-        _id: null,
-        totalAssets: { $sum: 1 },
-        totalValue: { $sum: { $ifNull: ['$procurement.amount', 0] } },
-        workstations: {
-          $sum: {
-            $cond: [
-              { $in: ['$core_details.type', ['Laptop', 'Desktop']] },
-              1,
-              0,
-            ],
-          },
-        },
-        assigned: {
-          $sum: {
-            $cond: [
-              {
-                $and: [
-                  { $gt: [{ $strLenCP: { $ifNull: ['$assignment.user', ''] } }, 0] },
-                  { $ne: ['$assignment.user', 'Unassigned'] },
-                ],
+      $facet: {
+        summary: [
+          {
+            $group: {
+              _id: null,
+              totalAssets: { $sum: 1 },
+              totalValue: { $sum: { $ifNull: ['$procurement.amount', 0] } },
+              workstations: {
+                $sum: {
+                  $cond: [
+                    {
+                      $in: [
+                        { $toUpper: { $ifNull: ['$core_details.type', ''] } },
+                        ['LAPTOP', 'DESKTOP'],
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
               },
-              1,
-              0,
-            ],
+              assigned: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $gt: [{ $strLenCP: { $ifNull: ['$assignment.user', ''] } }, 0] },
+                        {
+                          $ne: [
+                            { $toUpper: { $ifNull: ['$assignment.user', ''] } },
+                            'UNASSIGNED',
+                          ],
+                        },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
           },
-        },
+        ],
+        byDept: [
+          {
+            $group: {
+              _id: { $ifNull: ['$assignment.dept', 'Unassigned'] },
+              count: { $sum: 1 },
+              value: { $sum: { $ifNull: ['$procurement.amount', 0] } },
+            },
+          },
+          { $sort: { value: -1, count: -1 } },
+        ],
+        byBrand: [
+          {
+            $group: {
+              _id: { $ifNull: ['$core_details.manufacturer', 'Other'] },
+              count: { $sum: 1 },
+              value: { $sum: { $ifNull: ['$procurement.amount', 0] } },
+            },
+          },
+          { $sort: { count: -1, value: -1 } },
+        ],
+        byType: [
+          {
+            $group: {
+              _id: { $ifNull: ['$core_details.type', 'Other'] },
+              count: { $sum: 1 },
+              value: { $sum: { $ifNull: ['$procurement.amount', 0] } },
+            },
+          },
+          { $sort: { count: -1, value: -1 } },
+        ],
       },
     },
   ]);
 
-  return (
-    result[0] || {
-      totalAssets: 0,
-      totalValue: 0,
-      workstations: 0,
-      assigned: 0,
-    }
-  );
+  const base = facetResult?.summary?.[0] || {
+    totalAssets: 0,
+    totalValue: 0,
+    workstations: 0,
+    assigned: 0,
+  };
+
+  return {
+    totalAssets: base.totalAssets,
+    totalValue: base.totalValue,
+    workstations: base.workstations,
+    assigned: base.assigned,
+    analytics: {
+      byDept: (facetResult?.byDept || []).map((d) => ({
+      name: d._id || 'UNASSIGNED',
+        count: d.count,
+        value: d.value,
+      })),
+      byBrand: (facetResult?.byBrand || []).map((b) => ({
+      name: b._id || 'OTHER',
+        count: b.count,
+        value: b.value,
+      })),
+      byType: (facetResult?.byType || []).map((t) => ({
+      name: t._id || 'OTHER',
+        count: t.count,
+        value: t.value,
+      })),
+    },
+  };
 }
 
 const AI_SYSTEM_INSTRUCTION = `Convert the user's query into a raw MongoDB filter JSON object.
