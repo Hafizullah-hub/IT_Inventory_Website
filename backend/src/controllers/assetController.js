@@ -12,6 +12,35 @@ async function getAiClient() {
   return aiClient;
 }
 
+function mergeAnalyticsGroups(groups, sortByValue = false) {
+  const merged = new Map();
+
+  for (const group of groups) {
+    const name = group.name.trim();
+    const key = name.toLowerCase();
+    const existing = merged.get(key);
+
+    if (existing) {
+      existing.count += group.count;
+      existing.value += group.value;
+      if (group.count > existing.displayCount) {
+        existing.name = name;
+        existing.displayCount = group.count;
+      }
+    } else {
+      merged.set(key, { ...group, name, displayCount: group.count });
+    }
+  }
+
+  return [...merged.values()]
+    .sort((a, b) =>
+      sortByValue
+        ? b.value - a.value || b.count - a.count
+        : b.count - a.count || b.value - a.value
+    )
+    .map(({ displayCount, ...group }) => group);
+}
+
 async function computeStats(query = {}) {
   const [facetResult] = await Asset.aggregate([
     { $match: query },
@@ -106,21 +135,28 @@ async function computeStats(query = {}) {
     workstations: base.workstations,
     assigned: base.assigned,
     analytics: {
-      byDept: (facetResult?.byDept || []).map((d) => ({
-      name: d._id || 'UNASSIGNED',
-        count: d.count,
-        value: d.value,
-      })),
-      byBrand: (facetResult?.byBrand || []).map((b) => ({
-      name: b._id || 'OTHER',
-        count: b.count,
-        value: b.value,
-      })),
-      byType: (facetResult?.byType || []).map((t) => ({
-      name: t._id || 'OTHER',
-        count: t.count,
-        value: t.value,
-      })),
+      byDept: mergeAnalyticsGroups(
+        (facetResult?.byDept || []).map((d) => ({
+          name: d._id || 'UNASSIGNED',
+          count: d.count,
+          value: d.value,
+        })),
+        true
+      ),
+      byBrand: mergeAnalyticsGroups(
+        (facetResult?.byBrand || []).map((b) => ({
+          name: b._id || 'OTHER',
+          count: b.count,
+          value: b.value,
+        }))
+      ),
+      byType: mergeAnalyticsGroups(
+        (facetResult?.byType || []).map((t) => ({
+          name: t._id || 'OTHER',
+          count: t.count,
+          value: t.value,
+        }))
+      ),
     },
   };
 }
