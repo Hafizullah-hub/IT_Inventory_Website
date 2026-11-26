@@ -173,7 +173,7 @@ function generate50Assets() {
 
 async function seed50() {
   try {
-    await mongoose.connect(process.env.MONGO_URI);
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/it_inventory');
     console.log('Connected to MongoDB Atlas...');
 
     const mockAssets = generate50Assets();

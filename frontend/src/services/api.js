@@ -1,8 +1,5 @@
 // frontend/src/services/api.js
-const rawUrl = process.env.NEXT_PUBLIC_API_URL || '/api';
-const API_BASE = rawUrl.endsWith('/assets')
-  ? rawUrl
-  : `${rawUrl.replace(/\/$/, '')}/assets`;
+const API_BASE = '/api/assets';
 
 export const AssetService = {
   async getAssets(params = {}) {
