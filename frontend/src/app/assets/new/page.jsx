@@ -516,9 +516,9 @@ export default function NewAssetPage() {
         }
       }
 
+      setAssetPhoto(null);
       if (mode === 'another') {
         setFormData(nextInBatch(formData));
-        setAssetPhoto(null);
         setErrors({});
         setAttempt(0);
         setToast({
