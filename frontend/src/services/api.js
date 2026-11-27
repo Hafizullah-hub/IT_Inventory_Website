@@ -1,5 +1,50 @@
 // frontend/src/services/api.js
 const API_BASE = '/api/assets';
+const JPEG_OPTIMIZE_THRESHOLD = 1024 * 1024;
+const JPEG_MAX_DIMENSION = 1920;
+
+async function optimizeAssetImage(file) {
+  if (
+    file.type !== 'image/jpeg' ||
+    file.size <= JPEG_OPTIMIZE_THRESHOLD ||
+    typeof createImageBitmap !== 'function'
+  ) {
+    return file;
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, JPEG_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+
+  try {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not prepare the image for upload.');
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+    const compressed = await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('Could not compress the image for upload.'));
+        },
+        'image/jpeg',
+        0.82
+      );
+    });
+
+    if (compressed.size >= file.size * 0.9) return file;
+    return new File([compressed], file.name, {
+      type: 'image/jpeg',
+      lastModified: file.lastModified,
+    });
+  } finally {
+    bitmap.close();
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
 
 export const AssetService = {
   async getAssets(params = {}) {
@@ -67,10 +112,11 @@ export const AssetService = {
   },
 
   async uploadAssetImage(id, file) {
+    const uploadFile = await optimizeAssetImage(file);
     const res = await fetch(`${API_BASE}/${encodeURIComponent(id)}/image`, {
       method: 'PUT',
-      headers: { 'Content-Type': file.type },
-      body: file,
+      headers: { 'Content-Type': uploadFile.type },
+      body: uploadFile,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.message || 'Failed to upload asset photo');
