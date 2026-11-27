@@ -1,5 +1,67 @@
 // backend/src/controllers/assetController.js
+const { randomUUID } = require('crypto');
+const mongoose = require('mongoose');
 const Asset = require('../models/Asset');
+
+const IMAGE_TYPES = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
+
+function uppercaseStringValues(value) {
+  if (typeof value === 'string') return value.toUpperCase();
+  if (Array.isArray(value)) return value.map(uppercaseStringValues);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, uppercaseStringValues(nestedValue)])
+    );
+  }
+  return value;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getAssetImageBucket() {
+  if (!mongoose.connection.db) {
+    throw new Error('MongoDB is not connected.');
+  }
+  return new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
+    bucketName: 'assetImages',
+  });
+}
+
+function matchesImageType(buffer, contentType) {
+  if (contentType === 'image/jpeg') {
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+  if (contentType === 'image/png') {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (contentType === 'image/webp') {
+    return buffer.length >= 12 &&
+      buffer.toString('ascii', 0, 4) === 'RIFF' &&
+      buffer.toString('ascii', 8, 12) === 'WEBP';
+  }
+  return false;
+}
+
+async function removeStoredImage(bucket, imageId) {
+  if (!imageId) return;
+  const [file] = await bucket.find({ _id: imageId }).limit(1).toArray();
+  if (file) await bucket.delete(imageId);
+}
+
+async function findLatestStoredImage(bucket, documentId) {
+  const [file] = await bucket
+    .find({ 'metadata.documentId': documentId })
+    .sort({ uploadDate: -1 })
+    .limit(1)
+    .toArray();
+  return file || null;
+}
 
 let aiClient = null;
 const filterCache = new Map();
@@ -170,40 +232,111 @@ software.os.name, software.office.version, software.antivirus.name, software.oth
 procurement.supplier, procurement.capex_no, procurement.po_no, procurement.invoice_no, procurement.amount (Number), procurement.warranty.
 Rules:
 1. For String fields use {"$regex":"value","$options":"i"}.
-2. For procurement.amount use $gt, $gte, $lt, $lte.
-3. Output ONLY the MongoDB filter JSON object.`;
+2. When the user specifies multiple criteria, use $and to match ALL of them.
+3. For procurement.amount use $gt, $gte, $lt, $lte.
+4. Output ONLY the MongoDB filter JSON object.`;
 
 function buildSmartLocalFilter(promptText) {
-  const text = promptText.toLowerCase();
+  let remaining = promptText.toLowerCase();
   const andConditions = [];
 
+  // 1. Price / Amount comparisons
+  const overRegex = /(?:over|above|more than|greater than|>)\s*(?:rm\s*)?([0-9,]+(?:\.[0-9]+)?)/i;
+  const overMatch = remaining.match(overRegex);
+  if (overMatch) {
+    const val = parseFloat(overMatch[1].replace(/,/g, ''));
+    if (!isNaN(val)) andConditions.push({ 'procurement.amount': { $gt: val } });
+    remaining = remaining.replace(overRegex, ' ');
+  }
+
+  const underRegex = /(?:under|below|less than|cheaper than|<)\s*(?:rm\s*)?([0-9,]+(?:\.[0-9]+)?)/i;
+  const underMatch = remaining.match(underRegex);
+  if (underMatch) {
+    const val = parseFloat(underMatch[1].replace(/,/g, ''));
+    if (!isNaN(val)) andConditions.push({ 'procurement.amount': { $lt: val } });
+    remaining = remaining.replace(underRegex, ' ');
+  }
+
+  // 2. RAM sizes
+  const ramMatches = [...remaining.matchAll(/\b(8|16|32|64|128|256)\s*gb\b/gi)].map(
+    (m) => `${m[1]}GB`
+  );
+  if (ramMatches.length > 0 && /\b(ram|memory)\b/i.test(remaining)) {
+    andConditions.push({ 'hardware.ram': { $regex: ramMatches.join('|'), $options: 'i' } });
+    remaining = remaining
+      .replace(/\b(8|16|32|64|128|256)\s*gb\b/gi, ' ')
+      .replace(/\b(ram|memory)\b/gi, ' ');
+  }
+
+  // 3. Asset Types
   const types = [];
-  if (/\blaptops?\b/.test(text)) types.push('Laptop');
-  if (/\bdesktops?\b|\bpcs?\b/.test(text)) types.push('Desktop');
-  if (/\bservers?\b/.test(text)) types.push('Server');
-  if (/\bmonitors?\b|\bdisplays?\b|\bscreens?\b/.test(text)) types.push('Monitor');
+  if (/\blaptops?\b/i.test(remaining)) {
+    types.push('Laptop');
+    remaining = remaining.replace(/\blaptops?\b/gi, ' ');
+  }
+  if (/\b(desktops?|pcs?)\b/i.test(remaining)) {
+    types.push('Desktop');
+    remaining = remaining.replace(/\b(desktops?|pcs?)\b/gi, ' ');
+  }
+  if (/\bservers?\b/i.test(remaining)) {
+    types.push('Server');
+    remaining = remaining.replace(/\bservers?\b/gi, ' ');
+  }
+  if (/\b(monitors?|displays?|screens?)\b/i.test(remaining)) {
+    types.push('Monitor');
+    remaining = remaining.replace(/\b(monitors?|displays?|screens?)\b/gi, ' ');
+  }
   if (types.length === 1) {
     andConditions.push({ 'core_details.type': { $regex: `^${types[0]}$`, $options: 'i' } });
   } else if (types.length > 1) {
-    andConditions.push({ 'core_details.type': { $in: types.map((t) => new RegExp(`^${t}$`, 'i')) } });
+    andConditions.push({
+      'core_details.type': { $in: types.map((t) => new RegExp(`^${t}$`, 'i')) },
+    });
   }
 
+  // 4. Departments
   const depts = [];
-  if (/\bit\b|\binformation technology\b/.test(text)) depts.push('IT');
-  if (/\bfinance\b|\baccounting\b/.test(text)) depts.push('Finance');
-  if (/\bhr\b|\bhuman resources?\b/.test(text)) depts.push('HR');
-  if (/\boperations?\b|\bops\b/.test(text)) depts.push('Operations');
+  if (/\b(it|information technology)\b/i.test(remaining)) {
+    depts.push('IT');
+    remaining = remaining.replace(/\b(it|information technology)\b/gi, ' ');
+  }
+  if (/\b(finance|accounting)\b/i.test(remaining)) {
+    depts.push('Finance');
+    remaining = remaining.replace(/\b(finance|accounting)\b/gi, ' ');
+  }
+  if (/\b(hr|human resources?)\b/i.test(remaining)) {
+    depts.push('HR');
+    remaining = remaining.replace(/\b(hr|human resources?)\b/gi, ' ');
+  }
+  if (/\b(operations?|ops)\b/i.test(remaining)) {
+    depts.push('Operations');
+    remaining = remaining.replace(/\b(operations?|ops)\b/gi, ' ');
+  }
   if (depts.length === 1) {
     andConditions.push({ 'assignment.dept': { $regex: `^${depts[0]}$`, $options: 'i' } });
   } else if (depts.length > 1) {
-    andConditions.push({ 'assignment.dept': { $in: depts.map((d) => new RegExp(`^${d}$`, 'i')) } });
+    andConditions.push({
+      'assignment.dept': { $in: depts.map((d) => new RegExp(`^${d}$`, 'i')) },
+    });
   }
 
+  // 5. Manufacturers / Brands
   const brands = [];
-  if (/\bhpe\b/.test(text)) brands.push('HPE');
-  else if (/\bhp\b/.test(text)) brands.push('^HP$');
-  if (/\bdell\b/.test(text)) brands.push('Dell');
-  if (/\blenovo\b|\bthinkpad\b/.test(text)) brands.push('Lenovo');
+  if (/\bhpe\b/i.test(remaining)) {
+    brands.push('^HPE$');
+    remaining = remaining.replace(/\bhpe\b/gi, ' ');
+  } else if (/\bhp\b/i.test(remaining)) {
+    brands.push('^HP$');
+    remaining = remaining.replace(/\bhp\b/gi, ' ');
+  }
+  if (/\bdell\b/i.test(remaining)) {
+    brands.push('^Dell$');
+    remaining = remaining.replace(/\bdell\b/gi, ' ');
+  }
+  if (/\blenovo\b/i.test(remaining)) {
+    brands.push('^Lenovo$');
+    remaining = remaining.replace(/\blenovo\b/gi, ' ');
+  }
   if (brands.length === 1) {
     andConditions.push({ 'core_details.manufacturer': { $regex: brands[0], $options: 'i' } });
   } else if (brands.length > 1) {
@@ -212,28 +345,63 @@ function buildSmartLocalFilter(promptText) {
     });
   }
 
+  // 6. Antivirus
   const avs = [];
-  if (/crowdstrike|falcon/.test(text)) avs.push('CrowdStrike');
-  if (/kaspersky/.test(text)) avs.push('Kaspersky');
-  if (/sophos/.test(text)) avs.push('Sophos');
+  if (/\b(crowdstrike|falcon)\b/i.test(remaining)) {
+    avs.push('CrowdStrike');
+    remaining = remaining.replace(/\b(crowdstrike|falcon)\b/gi, ' ');
+  }
+  if (/\bkaspersky\b/i.test(remaining)) {
+    avs.push('Kaspersky');
+    remaining = remaining.replace(/\bkaspersky\b/gi, ' ');
+  }
+  if (/\bsophos\b/i.test(remaining)) {
+    avs.push('Sophos');
+    remaining = remaining.replace(/\bsophos\b/gi, ' ');
+  }
   if (avs.length > 0) {
     andConditions.push({ 'software.antivirus.name': { $regex: avs.join('|'), $options: 'i' } });
   }
 
-  const ramMatches = [...text.matchAll(/\b(8|16|32|64|128|256)\s*gb\b/gi)].map((m) => `${m[1]}GB`);
-  if (ramMatches.length > 0 && /ram|memory/.test(text)) {
-    andConditions.push({ 'hardware.ram': { $regex: ramMatches.join('|'), $options: 'i' } });
-  }
+  // 7. Strip English filler words & field-label words
+  const stopWords = new Set([
+    'show', 'me', 'all', 'the', 'with', 'using', 'assets', 'asset', 'in', 'or', 'and',
+    'for', 'from', 'that', 'have', 'has', 'are', 'is', 'by', 'of', 'to', 'on', 'at',
+    'department', 'dept', 'antivirus', 'av', 'brand', 'model', 'type', 'find', 'list',
+    'get', 'search', 'which', 'what', 'who', 'assigned', 'computer', 'computers', 'unit', 'units',
+    'processor', 'processors', 'cpu', 'cpus', 'storage', 'disk', 'hardisk', 'hard', 'drive',
+    'ram', 'memory', 'os', 'operating', 'system', 'software', 'app', 'apps', 'application',
+    'supplier', 'vendor', 'bought', 'purchased', 'procured', 'price', 'cost', 'amount', 'rm',
+    'over', 'under', 'above', 'below', 'more', 'less', 'than', 'greater', 'cheaper',
+    'running', 'installed', 'equipped', 'located', 'location', 'office', 'user', 'employee', 'staff',
+    'machines', 'machine', 'devices', 'device', 'workstations', 'workstation', 'hardware'
+  ]);
 
-  const overMatch = text.match(/(?:over|above|more than|greater than|>)\s*(?:rm\s*)?([0-9,]+(?:\.[0-9]+)?)/i);
-  if (overMatch) {
-    const val = parseFloat(overMatch[1].replace(/,/g, ''));
-    if (!isNaN(val)) andConditions.push({ 'procurement.amount': { $gt: val } });
-  }
-  const underMatch = text.match(/(?:under|below|less than|cheaper than|<)\s*(?:rm\s*)?([0-9,]+(?:\.[0-9]+)?)/i);
-  if (underMatch) {
-    const val = parseFloat(underMatch[1].replace(/,/g, ''));
-    if (!isNaN(val)) andConditions.push({ 'procurement.amount': { $lt: val } });
+  const leftoverTokens = remaining
+    .replace(/[^a-zA-Z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !stopWords.has(w));
+
+  for (const token of leftoverTokens) {
+    const tokenRegex = new RegExp(token, 'i');
+    andConditions.push({
+      $or: [
+        { 'core_details.model': tokenRegex },
+        { 'core_details.asset_no': tokenRegex },
+        { 'core_details.serial': tokenRegex },
+        { documentId: tokenRegex },
+        { 'core_details.comp_name': tokenRegex },
+        { 'assignment.user': tokenRegex },
+        { 'assignment.location': tokenRegex },
+        { 'hardware.processor': tokenRegex },
+        { 'hardware.ram': tokenRegex },
+        { 'hardware.hardisk': tokenRegex },
+        { 'software.os.name': tokenRegex },
+        { 'software.other_app': tokenRegex },
+        { 'procurement.supplier': tokenRegex },
+        { 'procurement.capex_no': tokenRegex },
+      ],
+    });
   }
 
   if (andConditions.length === 0) return null;
@@ -247,20 +415,30 @@ exports.getAssets = async (req, res) => {
     const query = {};
 
     if (search) {
-      const regex = new RegExp(search, 'i');
-      query.$or = [
-        { documentId: regex },
-        { 'core_details.asset_no': regex },
-        { 'core_details.serial': regex },
-        { 'core_details.manufacturer': regex },
-        { 'core_details.model': regex },
-        { 'core_details.comp_name': regex },
-        { 'assignment.user': regex },
-      ];
+      const terms = search.trim().split(/\s+/).filter(Boolean);
+      const termFilters = terms.map((term) => {
+        const regex = new RegExp(term, 'i');
+        return {
+          $or: [
+            { documentId: regex },
+            { 'core_details.asset_no': regex },
+            { 'core_details.serial': regex },
+            { 'core_details.manufacturer': regex },
+            { 'core_details.model': regex },
+            { 'core_details.comp_name': regex },
+            { 'assignment.user': regex },
+          ],
+        };
+      });
+      if (termFilters.length === 1) {
+        query.$or = termFilters[0].$or;
+      } else if (termFilters.length > 1) {
+        query.$and = termFilters;
+      }
     }
 
-    if (dept) query['assignment.dept'] = dept;
-    if (type) query['core_details.type'] = type;
+    if (dept) query['assignment.dept'] = new RegExp(`^${escapeRegex(dept.trim())}$`, 'i');
+    if (type) query['core_details.type'] = new RegExp(`^${escapeRegex(type.trim())}$`, 'i');
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [assets, stats] = await Promise.all([
@@ -288,6 +466,23 @@ exports.getAssetById = async (req, res) => {
   try {
     const asset = await Asset.findOne({ documentId: req.params.id }).lean();
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+    if (!asset.imageId) {
+      try {
+        const bucket = getAssetImageBucket();
+        const file = await findLatestStoredImage(bucket, asset.documentId);
+        if (file) {
+          asset.imageId = file._id;
+          await Asset.updateOne(
+            { _id: asset._id, imageId: null },
+            { $set: { imageId: file._id } }
+          );
+        }
+      } catch (imageError) {
+        console.error('Could not recover asset photo reference:', imageError);
+      }
+    }
+
     res.json({ data: asset });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -297,19 +492,23 @@ exports.getAssetById = async (req, res) => {
 // 3. CREATE NEW ASSET
 exports.createAsset = async (req, res) => {
   try {
-    const { documentId, core_details } = req.body;
-    const finalId = documentId || core_details?.asset_no;
+    const body = uppercaseStringValues(req.body || {});
+    const { documentId, core_details } = body;
+    const assetNo = String(core_details?.asset_no || '').trim();
+    const finalId = String(documentId || '').trim() || assetNo || randomUUID().toUpperCase();
 
-    if (!finalId) {
-      return res.status(400).json({ message: 'Asset Number (documentId) is required' });
-    }
-
-    const existing = await Asset.findOne({ documentId: finalId }).lean();
+    const existing = await Asset.findOne({
+      documentId: new RegExp(`^${escapeRegex(finalId)}$`, 'i'),
+    }).lean();
     if (existing) {
       return res.status(409).json({ message: `Asset ${finalId} already exists` });
     }
 
-    const newAsset = await Asset.create({ ...req.body, documentId: finalId });
+    const newAsset = await Asset.create({
+      ...body,
+      documentId: finalId,
+      core_details: { ...(core_details || {}), asset_no: assetNo },
+    });
     res.status(201).json({ data: newAsset });
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -319,9 +518,10 @@ exports.createAsset = async (req, res) => {
 // 4. UPDATE ASSET
 exports.updateAsset = async (req, res) => {
   try {
+    const body = uppercaseStringValues(req.body || {});
     const updated = await Asset.findOneAndUpdate(
       { documentId: req.params.id },
-      { $set: req.body },
+      { $set: body },
       { new: true, runValidators: true }
     ).lean();
     if (!updated) return res.status(404).json({ message: 'Asset not found' });
@@ -331,11 +531,163 @@ exports.updateAsset = async (req, res) => {
   }
 };
 
+// Asset photos are stored separately from asset documents in MongoDB GridFS.
+exports.getAssetImage = async (req, res) => {
+  try {
+    const asset = await Asset.findOne({ documentId: req.params.id }).lean();
+    if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+    const bucket = getAssetImageBucket();
+    let file;
+    if (asset.imageId) {
+      [file] = await bucket.find({ _id: asset.imageId }).limit(1).toArray();
+    } else {
+      file = await findLatestStoredImage(bucket, asset.documentId);
+      if (file) {
+        await Asset.updateOne(
+          { _id: asset._id, imageId: null },
+          { $set: { imageId: file._id } }
+        );
+      }
+    }
+    if (!file) return res.status(404).json({ message: 'Asset photo not found' });
+
+    res.set(
+      'Content-Type',
+      file.metadata?.contentType || file.contentType || 'application/octet-stream'
+    );
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    const downloadStream = bucket.openDownloadStream(file._id);
+    downloadStream.on('error', (err) => {
+      console.error('Error streaming asset photo:', err);
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        res.status(500).json({ message: 'Could not load asset photo' });
+      }
+    });
+    downloadStream.pipe(res);
+  } catch (err) {
+    console.error('Error loading asset photo:', err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.uploadAssetImage = async (req, res) => {
+  let bucket;
+  let uploadedImageId;
+  try {
+    const contentType = String(req.get('content-type') || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    if (!IMAGE_TYPES[contentType]) {
+      return res.status(415).json({ message: 'Choose a JPEG, PNG, or WebP image.' });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ message: 'The uploaded image is empty or invalid.' });
+    }
+    if (!matchesImageType(req.body, contentType)) {
+      return res.status(400).json({ message: 'The image data does not match its file type.' });
+    }
+
+    const asset = await Asset.findOne({ documentId: req.params.id });
+    if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+    bucket = getAssetImageBucket();
+    const extension = IMAGE_TYPES[contentType];
+    const uploadStream = bucket.openUploadStream(
+      `asset-${asset._id}.${extension}`,
+      {
+        metadata: { documentId: asset.documentId, contentType },
+      }
+    );
+    uploadedImageId = await new Promise((resolve, reject) => {
+      uploadStream.once('error', reject);
+      uploadStream.once('finish', () => resolve(uploadStream.id));
+      uploadStream.end(req.body);
+    });
+
+    const previousImageId = asset.imageId;
+    const updated = await Asset.findOneAndUpdate(
+      { _id: asset._id },
+      { $set: { imageId: uploadedImageId } },
+      { new: true, runValidators: true }
+    ).lean();
+    if (!updated) {
+      await removeStoredImage(bucket, uploadedImageId);
+      return res.status(404).json({ message: 'Asset not found' });
+    }
+
+    try {
+      await removeStoredImage(bucket, previousImageId);
+    } catch (cleanupError) {
+      console.error('New asset photo saved, but old photo cleanup failed:', cleanupError);
+      return res.status(200).json({
+        data: { imageId: updated.imageId },
+        warning: 'The new photo was saved, but the previous photo could not be removed.',
+      });
+    }
+
+    res.json({ data: { imageId: updated.imageId } });
+  } catch (err) {
+    if (bucket && uploadedImageId) {
+      try {
+        await removeStoredImage(bucket, uploadedImageId);
+      } catch (cleanupError) {
+        console.error('Could not clean up an incomplete asset photo upload:', cleanupError);
+      }
+    }
+    console.error('Error uploading asset photo:', err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.deleteAssetImage = async (req, res) => {
+  try {
+    const asset = await Asset.findOne({ documentId: req.params.id });
+    if (!asset) return res.status(404).json({ message: 'Asset not found' });
+    if (!asset.imageId) return res.json({ message: 'Asset has no photo.' });
+
+    const imageId = asset.imageId;
+    const updated = await Asset.findOneAndUpdate(
+      { _id: asset._id },
+      { $unset: { imageId: 1 } },
+      { new: true, runValidators: true }
+    );
+    if (!updated) return res.status(404).json({ message: 'Asset not found' });
+
+    try {
+      await removeStoredImage(getAssetImageBucket(), imageId);
+    } catch (cleanupError) {
+      console.error('Asset photo reference removed, but GridFS cleanup failed:', cleanupError);
+      return res.status(500).json({
+        message: 'Photo reference removed, but the stored image could not be deleted.',
+      });
+    }
+    res.json({ message: 'Asset photo removed.' });
+  } catch (err) {
+    console.error('Error removing asset photo:', err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // 5. DELETE ASSET
 exports.deleteAsset = async (req, res) => {
   try {
     const deleted = await Asset.findOneAndDelete({ documentId: req.params.id });
     if (!deleted) return res.status(404).json({ message: 'Asset not found' });
+    if (deleted.imageId) {
+      try {
+        await removeStoredImage(getAssetImageBucket(), deleted.imageId);
+      } catch (cleanupError) {
+        console.error('Asset deleted, but photo cleanup failed:', cleanupError);
+        return res.status(500).json({
+          message: 'Asset deleted, but its stored photo could not be removed.',
+        });
+      }
+    }
     res.json({ message: 'Asset deleted successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -387,28 +739,7 @@ exports.aiSearchAssets = async (req, res) => {
     }
 
     if (!mongoFilter) {
-      const cleanWords = prompt
-        .trim()
-        .replace(/[^a-zA-Z0-9\s-]/g, '')
-        .split(/\s+/)
-        .filter((w) => w.length > 1 && !['show', 'all', 'the', 'with', 'using', 'assets', 'in', 'or', 'and'].includes(w.toLowerCase()));
-
-      const regex = new RegExp(cleanWords.join('|') || prompt.trim(), 'i');
-      mongoFilter = {
-        $or: [
-          { documentId: regex },
-          { 'core_details.type': regex },
-          { 'core_details.manufacturer': regex },
-          { 'core_details.model': regex },
-          { 'assignment.user': regex },
-          { 'assignment.dept': regex },
-          { 'hardware.processor': regex },
-          { 'hardware.ram': regex },
-          { 'software.os.name': regex },
-          { 'software.antivirus.name': regex },
-          { 'procurement.supplier': regex },
-        ],
-      };
+      mongoFilter = {};
     }
 
     const filterString = JSON.stringify(mongoFilter);
@@ -419,7 +750,7 @@ exports.aiSearchAssets = async (req, res) => {
     filterCache.set(normalizedPrompt, mongoFilter);
 
     const [assets, stats] = await Promise.all([
-      Asset.find(mongoFilter).sort({ updatedAt: -1 }).limit(50).lean(),
+      Asset.find(mongoFilter).sort({ updatedAt: -1 }).limit(100).lean(),
       computeStats(mongoFilter),
     ]);
 

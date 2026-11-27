@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 
 const AssetSchema = new mongoose.Schema(
   {
-    // Maps directly to Firestore documentId / ASSET NO
+    // Internal record ID; asset numbers are optional business identifiers.
     documentId: {
       type: String,
       required: [true, 'Document ID (Asset No) is required'],
@@ -11,8 +11,9 @@ const AssetSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    imageId: { type: mongoose.Schema.Types.ObjectId, default: null },
     core_details: {
-      asset_no: { type: String, required: true, trim: true },
+      asset_no: { type: String, default: '', trim: true },
       serial: { type: String, default: '' },
       type: { type: String, default: '' }, // e.g., Laptop, Desktop, Server
       manufacturer: { type: String, default: '' },

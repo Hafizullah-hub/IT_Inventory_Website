@@ -61,6 +61,31 @@ export const AssetService = {
     return data;
   },
 
+  getAssetImageUrl(id, version) {
+    const url = `${API_BASE}/${encodeURIComponent(id)}/image`;
+    return version ? `${url}?v=${encodeURIComponent(version)}` : url;
+  },
+
+  async uploadAssetImage(id, file) {
+    const res = await fetch(`${API_BASE}/${encodeURIComponent(id)}/image`, {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to upload asset photo');
+    return data;
+  },
+
+  async deleteAssetImage(id) {
+    const res = await fetch(`${API_BASE}/${encodeURIComponent(id)}/image`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to remove asset photo');
+    return data;
+  },
+
   async deleteAsset(id) {
     const res = await fetch(`${API_BASE}/${encodeURIComponent(id)}`, {
       method: 'DELETE',

@@ -4,6 +4,7 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import Image from 'next/image';
 import { AssetService } from '../../../services/api';
 
 // 1. Default export wraps the content in <Suspense> for Next.js 16+
@@ -32,7 +33,11 @@ function AssetDetailContent() {
   }, [id]);
 
   const handleDelete = async () => {
-    if (!confirm(`Are you sure you want to delete asset ${asset.documentId}?`)) return;
+    const assetLabel =
+      asset.core_details?.asset_no ||
+      [asset.core_details?.manufacturer, asset.core_details?.model].filter(Boolean).join(' ') ||
+      'this asset';
+    if (!confirm(`Are you sure you want to delete ${assetLabel}?`)) return;
     try {
       await AssetService.deleteAsset(asset.documentId);
       router.push('/');
@@ -55,18 +60,34 @@ function AssetDetailContent() {
     <div className="max-w-5xl mx-auto space-y-6">
       {/* Top Action Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
-        <div>
-          <div className="flex items-center gap-3">
-            <span className="px-2.5 py-1 bg-blue-100 text-blue-700 font-mono text-xs font-semibold rounded">
-              {asset.documentId}
-            </span>
-            <h1 className="text-2xl font-bold">
-              {asset.core_details?.manufacturer} {asset.core_details?.model}
-            </h1>
+        <div className="flex min-w-0 items-center gap-4">
+          {asset.imageId ? (
+            <Image
+              src={AssetService.getAssetImageUrl(asset.documentId)}
+              alt={`${asset.core_details?.manufacturer || 'Asset'} ${asset.core_details?.model || ''}`}
+              width={112}
+              height={96}
+              unoptimized
+              className="h-24 w-28 shrink-0 rounded-lg border border-slate-200 bg-slate-50 object-contain dark:border-slate-700 dark:bg-slate-900"
+            />
+          ) : (
+            <div className="flex h-24 w-28 shrink-0 items-center justify-center rounded-lg border border-dashed border-slate-300 text-xs text-slate-500 dark:border-slate-600 dark:text-slate-400">
+              No photo
+            </div>
+          )}
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <span className="px-2.5 py-1 bg-blue-100 text-blue-700 font-mono text-xs font-semibold rounded">
+                {asset.core_details?.asset_no || 'No asset number'}
+              </span>
+              <h1 className="text-2xl font-bold">
+                {asset.core_details?.manufacturer} {asset.core_details?.model}
+              </h1>
+            </div>
+            <p className="text-sm text-slate-500 mt-1">
+              Assigned to <strong className="text-slate-700 dark:text-slate-200">{asset.assignment?.user}</strong> ({asset.assignment?.dept})
+            </p>
           </div>
-          <p className="text-sm text-slate-500 mt-1">
-            Assigned to <strong className="text-slate-700 dark:text-slate-200">{asset.assignment?.user}</strong> ({asset.assignment?.dept})
-          </p>
         </div>
 
         <div className="flex items-center gap-3">

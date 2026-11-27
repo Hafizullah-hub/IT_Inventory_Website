@@ -62,6 +62,21 @@ function SidebarNavFallback() {
   );
 }
 
+function HeaderActions() {
+  const pathname = usePathname() || '/';
+
+  if (pathname === '/assets/new') return null;
+
+  return (
+    <Link
+      href="/assets/new"
+      className="text-xs bg-blue-600 text-white px-3.5 py-2 rounded-md font-bold hover:bg-blue-700 transition"
+    >
+      + New Asset
+    </Link>
+  );
+}
+
 export default function RootLayout({ children }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -77,6 +92,10 @@ export default function RootLayout({ children }) {
                 } else {
                   document.documentElement.classList.remove('dark');
                 }
+                const savedPrefs = JSON.parse(localStorage.getItem('it_inventory_prefs') || '{}');
+                const fontSizes = { small: 14, medium: 16, large: 18 };
+                document.documentElement.style.fontSize =
+                  (fontSizes[savedPrefs.fontSize] || 16) + 'px';
               } catch (e) {}
             `,
           }}
@@ -111,12 +130,9 @@ export default function RootLayout({ children }) {
                 Enterprise Asset Portal
               </span>
               <div className="flex items-center space-x-4">
-                <Link
-                  href="/assets/new"
-                  className="text-xs bg-blue-600 text-white px-3.5 py-2 rounded-md font-bold hover:bg-blue-700 transition"
-                >
-                  + New Asset
-                </Link>
+                <Suspense fallback={null}>
+                  <HeaderActions />
+                </Suspense>
               </div>
             </header>
 
